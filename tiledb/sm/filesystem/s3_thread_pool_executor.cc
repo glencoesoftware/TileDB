@@ -33,6 +33,7 @@
 #ifdef HAVE_S3
 
 #include <cassert>
+#include <iostream>
 
 #include "tiledb/sm/filesystem/s3_thread_pool_executor.h"
 #include "tiledb/sm/misc/status.h"
@@ -42,7 +43,8 @@ namespace sm {
 
 S3ThreadPoolExecutor::S3ThreadPoolExecutor(ThreadPool* const thread_pool)
     : thread_pool_(thread_pool)
-    , state_(State::RUNNING) {
+    , state_(State::RUNNING)
+    , outstanding_tasks_(0) {
   assert(thread_pool_);
 }
 
@@ -55,65 +57,38 @@ Status S3ThreadPoolExecutor::Stop() {
   if (state_ == State::STOPPED)
     return Status::Ok();
 
-  Status ret_st = Status::Ok();
-
-  std::unique_lock<std::recursive_mutex> lock_guard(lock_);
-  assert(state_ == State::RUNNING);
+  std::unique_lock<std::mutex> lock_guard(lock_);
   state_ = State::STOPPING;
-  std::unordered_set<std::shared_ptr<std::future<Status>>> tasks =
-      std::move(tasks_);
-  tasks_.clear();
-  lock_guard.unlock();
-
-  // Wait for all outstanding tasks to complete.
-  for (auto& task : tasks) {
-    assert(task->valid());
-    task->wait();
-    const Status st = task->get();
-    if (!st.ok()) {
-      ret_st = st;
-    }
-  }
-
-  lock_guard.lock();
+  while (outstanding_tasks_ != 0)
+    cv_.wait(lock_guard);
   state_ = State::STOPPED;
   lock_guard.unlock();
 
-  return ret_st;
+  return Status::Ok();
 }
 
 bool S3ThreadPoolExecutor::SubmitToThread(std::function<void()>&& fn) {
-  std::shared_ptr<std::future<Status>> task_ptr =
-      std::make_shared<std::future<Status>>();
-  auto wrapped_fn = [this, fn, task_ptr]() -> Status {
+  auto wrapped_fn = [this, fn]() -> Status {
     fn();
 
-    std::unique_lock<std::recursive_mutex> lock_guard(lock_);
-    assert(state_ != State::STOPPED);
-    if (state_ == State::RUNNING) {
-      tasks_.erase(task_ptr);
-    }
+    std::unique_lock<std::mutex> lock_guard(lock_);
+    if (--outstanding_tasks_ == 0)
+      cv_.notify_all();
     lock_guard.unlock();
+
     return Status::Ok();
   };
 
-  std::unique_lock<std::recursive_mutex> lock_guard(lock_);
+  std::unique_lock<std::mutex> lock_guard(lock_);
   if (state_ != State::RUNNING) {
     return false;
   }
-
-  // 'ThreadPool::execute' may invoke 'wrapped_fn' on this thread.
-  // Although we are holding 'lock_', it is safe because it is a
-  // recursive mutex.
-  *task_ptr = thread_pool_->execute(wrapped_fn);
-  if (!task_ptr->valid()) {
-    return false;
-  }
-
-  tasks_.emplace(std::move(task_ptr));
+  ++outstanding_tasks_;
   lock_guard.unlock();
 
-  return true;
+  ThreadPool::Task task = thread_pool_->execute(wrapped_fn);
+
+  return task.valid();
 }
 
 }  // namespace sm
