@@ -32,6 +32,7 @@
 
 #ifdef HAVE_AZURE
 
+#include <future>
 #include <put_block_list_request_base.h>
 
 #include "tiledb/sm/filesystem/azure.h"

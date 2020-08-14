@@ -1459,8 +1459,12 @@ Status StorageManager::init_thread_pools() {
   io_concurrency_level = std::max(max_thread_count, io_concurrency_level);
 
   // Initialize the thread pools.
-  RETURN_NOT_OK(compute_tp_.init(compute_concurrency_level));
-  RETURN_NOT_OK(io_tp_.init(io_concurrency_level));
+
+  // TODO JOE
+
+  RETURN_NOT_OK(compute_tp_.init(2));
+  RETURN_NOT_OK(io_tp_.init(2));
+  io_tp_.set_is_io_tp();
 
   return Status::Ok();
 }

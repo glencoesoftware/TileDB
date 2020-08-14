@@ -507,6 +507,8 @@ class S3 {
   /** Whether or not to use multipart upload. */
   bool use_multipart_upload_;
 
+  ThreadPool dummy_tp_;
+
   /* ********************************* */
   /*          PRIVATE METHODS          */
   /* ********************************* */

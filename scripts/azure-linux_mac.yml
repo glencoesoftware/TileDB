@@ -24,18 +24,6 @@ steps:
   displayName: 'Install system headers (OSX only)'
 
 - bash: |
-    set -e pipefail
-    # Install clang-format (v5.0)
-    sudo scripts/install-clangformat.sh
-    src=$BUILD_REPOSITORY_LOCALPATH
-    cd $src
-    $src/scripts/run-clang-format.sh $src clang-format-5.0 0 \
-      $(find $src/tiledb $src/test/src $src/examples $src/tools \
-       -name "*.cc" -or -name "*.c" -or -name "*.h")
-  condition: eq(variables['Agent.OS'], 'Linux')
-  displayName: 'Check formatting (linux only)'
-
-- bash: |
     # DELETEME work-around for https://github.com/microsoft/azure-pipelines-image-generation/issues/969
     sudo chown root.root /
 

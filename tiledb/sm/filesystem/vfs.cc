@@ -1174,7 +1174,7 @@ Status VFS::read(
   if (num_ops == 1) {
     return read_impl(uri, offset, buffer, nbytes);
   } else {
-    std::vector<std::future<Status>> results;
+    std::vector<ThreadPool::Task> results;
     uint64_t thread_read_nbytes = utils::math::ceil(nbytes, num_ops);
 
     for (uint64_t i = 0; i < num_ops; i++) {
@@ -1183,6 +1183,7 @@ Status VFS::read(
       uint64_t thread_nbytes = end - begin + 1;
       uint64_t thread_offset = offset + begin;
       auto thread_buffer = reinterpret_cast<char*>(buffer) + begin;
+      std::cerr << "  JOE execute VFS::read " << std::endl;
       auto task = cancelable_tasks_.execute(
           io_tp_, [this, uri, thread_offset, thread_buffer, thread_nbytes]() {
             return read_impl(uri, thread_offset, thread_buffer, thread_nbytes);
@@ -1249,7 +1250,7 @@ Status VFS::read_all(
     const URI& uri,
     const std::vector<std::tuple<uint64_t, void*, uint64_t>>& regions,
     ThreadPool* thread_pool,
-    std::vector<std::future<Status>>* tasks) {
+    std::vector<ThreadPool::Task>* tasks) {
   if (!init_)
     return LOG_STATUS(Status::VFSError("Cannot read all; VFS not initialized"));
 
@@ -1264,6 +1265,7 @@ Status VFS::read_all(
   for (const auto& batch : batches) {
     URI uri_copy = uri;
     BatchedRead batch_copy = batch;
+    std::cerr << "  JOE execute VFS::read_all " << std::endl;
     auto task = thread_pool->execute([uri_copy, batch_copy, this]() {
       Buffer buffer;
       RETURN_NOT_OK(buffer.realloc(batch_copy.nbytes));

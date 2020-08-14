@@ -2561,8 +2561,9 @@ Status Writer::write_all_tiles(
 
   assert(!tiles->empty());
 
-  std::vector<std::future<Status>> tasks;
+  std::vector<ThreadPool::Task> tasks;
   for (auto& it : *tiles) {
+    std::cerr << "  JOE execute Writer::write_all_tiles " << std::endl;
     tasks.push_back(storage_manager_->io_tp()->execute([&, this]() {
       RETURN_CANCEL_OR_ERROR(write_tiles(it.first, frag_meta, &it.second));
       return Status::Ok();
@@ -2587,6 +2588,8 @@ Status Writer::write_tiles(
   if (tiles->empty())
     return Status::Ok();
 
+  std::cerr << "JOE Writer::write_tiles 1 " << std::endl;
+
   // For easy reference
   bool var_size = array_schema_->var_size(name);
   const auto& uri = frag_meta->uri(name);
@@ -2610,12 +2613,16 @@ Status Writer::write_tiles(
     }
   }
 
+  std::cerr << "JOE Writer::write_tiles 2 " << std::endl;
+
   // Close files, except in the case of global order
   if (layout_ != Layout::GLOBAL_ORDER) {
     RETURN_NOT_OK(storage_manager_->close_file(frag_meta->uri(name)));
     if (var_size)
       RETURN_NOT_OK(storage_manager_->close_file(frag_meta->var_uri(name)));
   }
+
+  std::cerr << "JOE Writer::write_tiles 3 " << std::endl;
 
   return Status::Ok();
 }
