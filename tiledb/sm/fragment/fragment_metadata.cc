@@ -82,6 +82,11 @@ FragmentMetadata::FragmentMetadata(
     auto dim_name = array_schema_->dimension(i)->name();
     idx_map_[dim_name] = array_schema_->attribute_num() + 1 + i;
   }
+
+  // Create a mutex for each attribute/dimension.
+  idx_mtx_.reserve(idx_map_.size());
+  for (size_t i = 0; i < idx_map_.size(); ++i)
+    idx_mtx_.emplace_back(new std::mutex());
 }
 
 FragmentMetadata::~FragmentMetadata() = default;
@@ -933,22 +938,39 @@ Status FragmentMetadata::load_tile_offsets(
   if (version_ <= 2)
     return Status::Ok();
 
-  std::lock_guard<std::mutex> lock(mtx_);
+  // Protect `loaded_metadata_.tile_offsets_[idx]`,
+  // `gt_offsets_.tile_offsets_[idx]`.
+  std::unique_lock<std::mutex> idx_mtx_lock(*idx_mtx_[idx]);
+
+  // Protect `loaded_metadata_.tile_offsets_` and
+  // `gt_offsets_.tile_offsets_`.
+  std::unique_lock<std::mutex> mtx_lock(mtx_);
 
   if (loaded_metadata_.tile_offsets_[idx])
     return Status::Ok();
 
+  const uint64_t gt_offset = gt_offsets_.tile_offsets_[idx];
+
+  // Done accessing `loaded_metadata_.tile_offsets_` and
+  // `gt_offsets_.tile_offsets_`.
+  mtx_lock.unlock();
+
   Buffer buff;
-  RETURN_NOT_OK(read_generic_tile_from_file(
-      encryption_key, gt_offsets_.tile_offsets_[idx], &buff));
+  RETURN_NOT_OK(read_generic_tile_from_file(encryption_key, gt_offset, &buff));
 
   STATS_ADD_COUNTER(
       stats::Stats::CounterType::READ_TILE_OFFSETS_SIZE, buff.size());
+
+  // Protect `load_tile_offsets()` and `loaded_metadata_.tile_offsets_`.
+  mtx_lock.lock();
 
   ConstBuffer cbuff(&buff);
   RETURN_NOT_OK(load_tile_offsets(idx, &cbuff));
 
   loaded_metadata_.tile_offsets_[idx] = true;
+
+  // Done accessing `load_tile_offsets()` and `loaded_metadata_.tile_offsets_`.
+  mtx_lock.unlock();
 
   return Status::Ok();
 }

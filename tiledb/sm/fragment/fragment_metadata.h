@@ -534,6 +534,12 @@ class FragmentMetadata {
   /** Local mutex for thread-safety. */
   std::mutex mtx_;
 
+  /**
+   * Protects attribute/dimension-specific data structures
+   * by their index.
+   */
+  std::vector<std::unique_ptr<std::mutex>> idx_mtx_;
+
   /** The non-empty domain of the fragment. */
   NDRange non_empty_domain_;
 
