@@ -930,10 +930,12 @@ Status Reader::copy_fixed_cells(
 
   // Precompute the cell range destination offsets in the buffer.
   uint64_t buffer_offset = 0;
-  for (uint64_t i = 0; i < ctx_cache->cs_offsets.size(); i++) {
+  std::unique_ptr<std::vector<uint64_t>> cs_offsets =
+      ctx_cache->get_cs_offsets();
+  for (uint64_t i = 0; i < cs_offsets->size(); i++) {
     const auto& cs = result_cell_slabs[i];
     auto bytes_to_copy = cs.length_ * cell_size;
-    ctx_cache->cs_offsets[i] = buffer_offset;
+    (*cs_offsets)[i] = buffer_offset;
     buffer_offset += bytes_to_copy;
   }
 
@@ -951,11 +953,12 @@ Status Reader::copy_fixed_cells(
       &name,
       stride,
       &result_cell_slabs,
-      ctx_cache);
+      *cs_offsets,
+      *ctx_cache->cs_partitions());
   auto statuses = parallel_for(
       storage_manager_->compute_tp(),
       0,
-      ctx_cache->cs_partitions.size(),
+      ctx_cache->cs_partitions()->size(),
       std::move(copy_fn));
 
   for (auto st : statuses)
@@ -972,38 +975,16 @@ Status Reader::copy_fixed_cells(
 void Reader::populate_cfc_ctx_cache(
     const std::vector<ResultCellSlab>& result_cell_slabs,
     CopyFixedCellsContextCache* const ctx_cache) {
-  auto cs_offsets = &ctx_cache->cs_offsets;
-  auto cs_partitions = &ctx_cache->cs_partitions;
-
-  // If `ctx_cache` is already populated, we're done.
-  if (!cs_offsets->empty()) {
-    return;
-  }
-
-  // Allocate and resize `cs_offsets`.
-  auto num_cs = result_cell_slabs.size();
-  cs_offsets->resize(num_cs);
-
-  // Partition the range of the `result_cell_slab` into
-  // individual cell ranges for each TBB thread. If TBB
-  // is disabled, we will use the concurrency level from
-  // the compute thread pool.
-  const int num_threads =
+  // Fetch the number that we will use for copying. When TBB
+  // is enabled, it is the number of TBB threads. Otherwise, it
+  // is the concurrency level of the compute threadpool.
+  const int num_copy_threads =
       global_state::GlobalState::GetGlobalState().tbb_threads() > 0 ?
           global_state::GlobalState::GetGlobalState().tbb_threads() :
           storage_manager_->compute_tp()->concurrency_level();
-  const uint64_t num_cs_partitions = std::min<uint64_t>(num_threads, num_cs);
-  const uint64_t cs_per_partition = num_cs / num_cs_partitions;
-  const uint64_t cs_per_partition_carry = num_cs % num_cs_partitions;
 
-  // Calculate the partition offsets into `cs_offsets`.
-  uint64_t num_cs_partitioned = 0;
-  for (uint64_t i = 0; i < num_cs_partitions; ++i) {
-    const uint64_t num_cs_in_partition =
-        cs_per_partition + ((i < cs_per_partition_carry) ? 1 : 0);
-    num_cs_partitioned += num_cs_in_partition;
-    cs_partitions->emplace_back(num_cs_partitioned);
-  }
+  // Initialize the context cache. This is a no-op if already initialized.
+  ctx_cache->initialize(result_cell_slabs, num_copy_threads);
 }
 
 Status Reader::copy_partitioned_fixed_cells(
@@ -1011,7 +992,8 @@ Status Reader::copy_partitioned_fixed_cells(
     const std::string* const name,
     const uint64_t stride,
     const std::vector<ResultCellSlab>* const result_cell_slabs,
-    const CopyFixedCellsContextCache* const ctx_cache) {
+    const std::vector<uint64_t>& cs_offsets,
+    const std::vector<size_t>& cs_partitions) {
   assert(name);
   assert(result_cell_slabs);
   assert(ctx_cache);
@@ -1027,13 +1009,13 @@ Status Reader::copy_partitioned_fixed_cells(
 
   // Calculate the partition to operate on.
   const uint64_t cs_idx_start =
-      partition_idx == 0 ? 0 : ctx_cache->cs_partitions[partition_idx - 1];
-  const uint64_t cs_idx_end = ctx_cache->cs_partitions[partition_idx];
+      partition_idx == 0 ? 0 : cs_partitions[partition_idx - 1];
+  const uint64_t cs_idx_end = cs_partitions[partition_idx];
 
   // Copy the cells.
   for (uint64_t cs_idx = cs_idx_start; cs_idx < cs_idx_end; ++cs_idx) {
     const auto& cs = (*result_cell_slabs)[cs_idx];
-    uint64_t offset = ctx_cache->cs_offsets[cs_idx];
+    uint64_t offset = cs_offsets[cs_idx];
 
     // Copy
     if (cs.tile_ == nullptr) {  // Empty range
@@ -1064,7 +1046,7 @@ Status Reader::copy_partitioned_fixed_cells(
 
 Status Reader::copy_var_cells(
     const std::string& name,
-    uint64_t stride,
+    const uint64_t stride,
     const std::vector<ResultCellSlab>& result_cell_slabs,
     CopyVarCellsContextCache* const ctx_cache) {
   assert(ctx_cache);
@@ -1085,12 +1067,16 @@ Status Reader::copy_var_cells(
 
   // Compute the destinations of offsets and var-len data in the buffers.
   uint64_t total_offset_size, total_var_size;
+  std::unique_ptr<std::vector<uint64_t>> offset_offsets_per_cs =
+      ctx_cache->get_offset_offsets_per_cs();
+  std::unique_ptr<std::vector<uint64_t>> var_offsets_per_cs =
+      ctx_cache->get_var_offsets_per_cs();
   RETURN_NOT_OK(compute_var_cell_destinations(
       name,
       stride,
       result_cell_slabs,
-      &ctx_cache->offset_offsets_per_cs,
-      &ctx_cache->var_offsets_per_cs,
+      offset_offsets_per_cs.get(),
+      var_offsets_per_cs.get(),
       &total_offset_size,
       &total_var_size));
 
@@ -1112,11 +1098,13 @@ Status Reader::copy_var_cells(
       &name,
       stride,
       &result_cell_slabs,
-      ctx_cache);
+      offset_offsets_per_cs.get(),
+      var_offsets_per_cs.get(),
+      ctx_cache->cs_partitions());
   auto statuses = parallel_for(
       storage_manager_->compute_tp(),
       0,
-      ctx_cache->cs_partitions.size(),
+      ctx_cache->cs_partitions()->size(),
       copy_fn);
 
   // Check all statuses
@@ -1135,67 +1123,16 @@ Status Reader::copy_var_cells(
 void Reader::populate_cvc_ctx_cache(
     const std::vector<ResultCellSlab>& result_cell_slabs,
     CopyVarCellsContextCache* const ctx_cache) {
-  assert(ctx_cache);
-
-  auto cs_partitions = &ctx_cache->cs_partitions;
-  auto offset_offsets_per_cs = &ctx_cache->offset_offsets_per_cs;
-  auto var_offsets_per_cs = &ctx_cache->var_offsets_per_cs;
-
-  // If `ctx_cache` is already populated, we're done.
-  if (!cs_partitions->empty()) {
-    return;
-  }
-
-  // Calculate the partition range.
-  const size_t num_cs = result_cell_slabs.size();
-  const int num_threads =
+  // Fetch the number that we will use for copying. When TBB
+  // is enabled, it is the number of TBB threads. Otherwise, it
+  // is the concurrency level of the compute threadpool.
+  const int num_copy_threads =
       global_state::GlobalState::GetGlobalState().tbb_threads() > 0 ?
           global_state::GlobalState::GetGlobalState().tbb_threads() :
           storage_manager_->compute_tp()->concurrency_level();
-  const uint64_t num_cs_partitions = std::min<uint64_t>(num_threads, num_cs);
-  const uint64_t cs_per_partition = num_cs / num_cs_partitions;
-  const uint64_t cs_per_partition_carry = num_cs % num_cs_partitions;
 
-  // Allocate space for all of the partitions.
-  cs_partitions->reserve(num_cs_partitions);
-
-  // Compute the boundary between each partition. Each boundary
-  // is represented by an `std::pair` that contains the total
-  // length of each cell slab in the leading partition and an
-  // exclusive cell slab index that ends the partition.
-  size_t total_cs_length = 0;
-  uint64_t next_partition_idx = cs_per_partition;
-  if (cs_per_partition_carry > 0)
-    ++next_partition_idx;
-
-  for (uint64_t cs_idx = 0; cs_idx < num_cs; cs_idx++) {
-    if (cs_idx == next_partition_idx) {
-      cs_partitions->emplace_back(total_cs_length, cs_idx);
-
-      // The final partition may contain extra cell slabs that did
-      // not evenly divide into the partition range. Set the
-      // `next_partition_idx` to zero and build the last boundary
-      // after this for-loop.
-      if (cs_partitions->size() == num_cs_partitions) {
-        next_partition_idx = 0;
-      } else {
-        next_partition_idx += cs_per_partition;
-        if (cs_idx < (cs_per_partition_carry - 1))
-          ++next_partition_idx;
-      }
-    }
-
-    total_cs_length += result_cell_slabs[cs_idx].length_;
-  }
-
-  // Store the final boundary.
-  cs_partitions->emplace_back(total_cs_length, num_cs);
-
-  // Allocate and size both `offset_offsets_per_cs` and
-  // `var_offsets_per_cs` to contain enough elements for
-  // storing any result cell.
-  offset_offsets_per_cs->resize(total_cs_length);
-  var_offsets_per_cs->resize(total_cs_length);
+  // Initialize the context cache. This is a no-op if already initialized.
+  ctx_cache->initialize(result_cell_slabs, num_copy_threads);
 }
 
 Status Reader::compute_var_cell_destinations(
@@ -1278,10 +1215,11 @@ Status Reader::copy_partitioned_var_cells(
     const std::string* const name,
     uint64_t stride,
     const std::vector<ResultCellSlab>* const result_cell_slabs,
-    CopyVarCellsContextCache* const ctx_cache) {
+    const std::vector<uint64_t>* const offset_offsets_per_cs,
+    const std::vector<uint64_t>* const var_offsets_per_cs,
+    const std::vector<std::pair<size_t, size_t>>* const cs_partitions) {
   assert(name);
   assert(result_cell_slabs);
-  assert(ctx_cache);
 
   auto it = buffers_.find(*name);
   auto buffer = (unsigned char*)it->second.buffer_;
@@ -1291,9 +1229,6 @@ Status Reader::copy_partitioned_var_cells(
   if (array_schema_->is_attr(*name))
     fill_value = array_schema_->attribute(*name)->fill_value();
   auto fill_value_size = (uint64_t)fill_value.size();
-  auto cs_partitions = &ctx_cache->cs_partitions;
-  auto offset_offsets_per_cs = &ctx_cache->offset_offsets_per_cs;
-  auto var_offsets_per_cs = &ctx_cache->var_offsets_per_cs;
 
   // Fetch the starting array offset into both `offset_offsets_per_cs`
   // and `var_offsets_per_cs`.
@@ -1539,7 +1474,7 @@ Status Reader::compute_result_coords(
 
   // Preload zipped coordinate tile offsets. Note that this will
   // ignore fragments with a version >= 5.
-  RETURN_CANCEL_OR_ERROR(load_offsets({constants::coords}));
+  RETURN_CANCEL_OR_ERROR(load_tile_offsets({constants::coords}));
 
   // Preload unzipped coordinate tile offsets. Note that this will
   // ignore fragments with a version < 5.
@@ -1548,7 +1483,7 @@ Status Reader::compute_result_coords(
   dim_names.reserve(dim_num);
   for (unsigned d = 0; d < dim_num; ++d)
     dim_names.emplace_back(array_schema_->dimension(d)->name());
-  RETURN_CANCEL_OR_ERROR(load_offsets(dim_names));
+  RETURN_CANCEL_OR_ERROR(load_tile_offsets(dim_names));
 
   // Read and unfilter zipped coordinate tiles. Note that
   // this will ignore fragments with a version >= 5.
@@ -1556,10 +1491,30 @@ Status Reader::compute_result_coords(
   RETURN_CANCEL_OR_ERROR(unfilter_tiles(constants::coords, tmp_result_tiles));
 
   // Read and unfilter unzipped coordinate tiles. Note that
-  // this will ignore fragments with a version < 5.
-  for (const auto& dim_name : dim_names) {
-    RETURN_CANCEL_OR_ERROR(read_tiles(dim_name, tmp_result_tiles));
-    RETURN_CANCEL_OR_ERROR(unfilter_tiles(dim_name, tmp_result_tiles));
+  // this will ignore fragments with a version < 5. For multiple
+  // dimension names, we will read them in parallel. Otherwise,
+  // we will read it directly on this thread.
+  if (!dim_names.empty()) {
+    if (dim_names.size() == 1) {
+      RETURN_CANCEL_OR_ERROR(read_tiles(dim_names[0], tmp_result_tiles));
+    } else {
+      const auto statuses = parallel_for(
+          storage_manager_->compute_tp(),
+          0,
+          dim_names.size(),
+          [&](const uint64_t i) {
+            RETURN_NOT_OK(read_tiles(dim_names[i], tmp_result_tiles));
+            return Status::Ok();
+          });
+
+      for (const auto& st : statuses)
+        RETURN_CANCEL_OR_ERROR(st);
+    }
+
+    // Unfiltering tiles is not thread safe and must be executed
+    // serially for each dimension name.
+    for (const auto& dim_name : dim_names)
+      RETURN_CANCEL_OR_ERROR(unfilter_tiles(dim_name, tmp_result_tiles));
   }
 
   // Fetch the sub partitioner's memory budget.
@@ -2002,7 +1957,8 @@ Status Reader::unfilter_tiles(
 
   auto statuses = parallel_for(
       storage_manager_->compute_tp(), 0, num_tiles, [&, this](uint64_t i) {
-        auto& tile = result_tiles[i];
+        ResultTile* const tile = result_tiles[i];
+
         auto& fragment = fragment_metadata_[tile->frag_idx()];
         auto format_version = fragment->format_version();
 
@@ -2019,7 +1975,7 @@ Status Reader::unfilter_tiles(
               tile_pair->first.filtered_buffer()->size() == 0)
             return Status::Ok();
 
-          // Get information about the tile in its fragment
+          // Get information about the tile in its fragment.
           auto tile_attr_uri = fragment->uri(name);
           auto tile_idx = tile->tile_idx();
           uint64_t tile_attr_offset;
@@ -2261,7 +2217,7 @@ Status Reader::init_tile(
   return Status::Ok();
 }
 
-Status Reader::load_offsets(const std::vector<std::string>& names) {
+Status Reader::load_tile_offsets(const std::vector<std::string>& names) {
   const auto encryption_key = array_->encryption_key();
 
   const auto statuses = parallel_for(
@@ -2346,6 +2302,9 @@ Status Reader::read_tiles(
   fragment_idxs_vec.reserve(fragment_idxs_set.size());
   for (const auto& idx : fragment_idxs_set)
     fragment_idxs_vec.emplace_back(idx);
+
+  // Protect all elements within `result_tiles`.
+  std::unique_lock<std::mutex> ul(result_tiles_mutex_);
 
   // Populate the list of regions per file to be read.
   std::map<URI, std::vector<std::tuple<uint64_t, void*, uint64_t>>> all_regions;
@@ -2443,6 +2402,9 @@ Status Reader::read_tiles(
     }
   }
 
+  // We're done accessing elements within `result_tiles`.
+  ul.unlock();
+
   // Do not use the read-ahead cache because tiles will be
   // cached in the tile cache.
   const bool use_read_ahead = false;
@@ -2537,6 +2499,7 @@ Status Reader::copy_coordinates(
   // a single context cache at the same time to reduce memory use.
   std::vector<std::string> fixed_names;
   std::vector<std::string> var_names;
+
   for (const auto& it : buffers_) {
     const auto& name = it.first;
     if (read_state_.overflowed_)
@@ -2576,7 +2539,7 @@ Status Reader::copy_coordinates(
 }
 
 Status Reader::copy_attribute_values(
-    uint64_t stride,
+    const uint64_t stride,
     const std::vector<ResultTile*>& result_tiles,
     const std::vector<ResultCellSlab>& result_cell_slabs) {
   STATS_START_TIMER(stats::Stats::TimerType::READ_COPY_ATTR_VALUES);
@@ -2633,22 +2596,64 @@ Status Reader::copy_attribute_values(
     names.emplace_back(name);
   }
 
-  // Pre-load all attribute offsets into memory.
-  load_offsets(names);
+  // Pre-load all attribute/dimension offsets into memory.
+  load_tile_offsets(names);
 
-  // Read, unfilter, and copy all attributes into memory.
+  // Instantiate context caches for copying fixed and variable
+  // cells.
   CopyFixedCellsContextCache fixed_ctx_cache;
   CopyVarCellsContextCache var_ctx_cache;
-  for (const auto& name : names) {
-    RETURN_CANCEL_OR_ERROR(read_tiles(name, result_tiles));
-    RETURN_CANCEL_OR_ERROR(unfilter_tiles(name, result_tiles, &cs_ranges));
-    if (!array_schema_->var_size(name))
+
+  // The maximum number of attribute/dimensions to read and unfilter in
+  // parallel. Each attribute/dimension requires additional memory to
+  // buffer reads into before copying them back into `buffers_`. Cells
+  // must be copied before moving onto the next set of concurrent reads
+  // to prevent bloating memory. Additionally, the copy cells paths are
+  // performed in serial, which will bottleneck the read concurrency.
+  // Increasing this number will have diminishing returns on performance.
+  const uint64_t concurrent_reads = 2;
+
+  // Iterate through all of the attribute/dimension names. This loop
+  // will read, unfilter, and copy tiles back into the `buffers_`.
+  uint64_t names_idx = 0;
+  while (names_idx < names.size()) {
+    // We will perform `concurrent_reads` unless we have a smaller
+    // number of remaining attribute/dimensions to process.
+    const uint64_t num_reads =
+        std::min(concurrent_reads, names.size() - names_idx);
+
+    // Reading tiles are thread safe. However, we will perform
+    // them on this thread if there is only one read to perform.
+    if (num_reads == 1) {
+      RETURN_CANCEL_OR_ERROR(read_tiles(names[names_idx], result_tiles));
+    } else {
+      const auto statuses = parallel_for(
+          storage_manager_->compute_tp(), 0, num_reads, [&](const uint64_t i) {
+            RETURN_NOT_OK(read_tiles(names[names_idx + i], result_tiles));
+            return Status::Ok();
+          });
+
+      for (const auto& st : statuses)
+        RETURN_CANCEL_OR_ERROR(st);
+    }
+
+    // Copy the cells into the associated `buffers_`, and then clear the cells
+    // from the tiles. The cell copies are not thread safe. Clearing tiles are
+    // thread safe, but quick enough that they do not justify scheduling on
+    // separate threads.
+    for (uint64_t i = 0; i < num_reads; ++i) {
       RETURN_CANCEL_OR_ERROR(
-          copy_fixed_cells(name, stride, result_cell_slabs, &fixed_ctx_cache));
-    else
-      RETURN_CANCEL_OR_ERROR(
-          copy_var_cells(name, stride, result_cell_slabs, &var_ctx_cache));
-    clear_tiles(name, result_tiles);
+          unfilter_tiles(names[names_idx + i], result_tiles, &cs_ranges));
+      if (!array_schema_->var_size(names[names_idx + i]))
+        RETURN_CANCEL_OR_ERROR(copy_fixed_cells(
+            names[names_idx + i], stride, result_cell_slabs, &fixed_ctx_cache));
+      else
+        RETURN_CANCEL_OR_ERROR(copy_var_cells(
+            names[names_idx + i], stride, result_cell_slabs, &var_ctx_cache));
+      clear_tiles(names[names_idx + i], result_tiles);
+    }
+
+    names_idx += num_reads;
   }
 
   return Status::Ok();
