@@ -129,19 +129,19 @@ const char empty_char = std::numeric_limits<char>::min();
 const int8_t empty_int8 = std::numeric_limits<int8_t>::min();
 
 /** The special value for an empty uint8. */
-const uint8_t empty_uint8 = std::numeric_limits<uint8_t>::max();
+const uint8_t empty_uint8 = std::numeric_limits<uint8_t>::min();
 
 /** The special value for an empty int16. */
 const int16_t empty_int16 = std::numeric_limits<int16_t>::min();
 
 /** The special value for an empty uint16. */
-const uint16_t empty_uint16 = std::numeric_limits<uint16_t>::max();
+const uint16_t empty_uint16 = std::numeric_limits<uint16_t>::min();
 
 /** The special value for an empty uint32. */
-const uint32_t empty_uint32 = std::numeric_limits<uint32_t>::max();
+const uint32_t empty_uint32 = std::numeric_limits<uint32_t>::min();
 
 /** The special value for an empty uint64. */
-const uint64_t empty_uint64 = std::numeric_limits<uint64_t>::max();
+const uint64_t empty_uint64 = std::numeric_limits<uint64_t>::min();
 
 /** The special value for an empty ASCII. */
 const uint8_t empty_ascii = 0;
