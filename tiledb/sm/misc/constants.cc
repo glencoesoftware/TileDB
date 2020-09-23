@@ -129,7 +129,7 @@ const char empty_char = std::numeric_limits<char>::min();
 const int8_t empty_int8 = std::numeric_limits<int8_t>::min();
 
 /** The special value for an empty uint8. */
-const uint8_t empty_uint8 = std::numeric_limits<uint8_t>::min();
+const uint8_t empty_uint8 = std::numeric_limits<uint8_t>::max();
 
 /** The special value for an empty int16. */
 const int16_t empty_int16 = std::numeric_limits<int16_t>::min();
